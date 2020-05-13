@@ -8,7 +8,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
-class SRGAN:
+class SRResNet:
     def __init__(self):
         self.batchSize = 64
         self.r = 2
@@ -51,8 +51,8 @@ class SRGAN:
 
         x = Conv2D(self.generatorFilters * 4, kernel_size=3, strides=1, padding='same')(x)
 
-        x = Reshape((1, self.imageSize, self.imageSize, r, r, self.generatorFilters))(x)
-        x = Permute((1, 2, 4, 3, 5, 6))(x)
+        x = Reshape((self.imageSize, self.imageSize, r, r, self.generatorFilters))(x)
+        x = Permute((1, 3, 2, 4, 5))(x)
         x = Reshape((self.imageSize2x, self.imageSize2x, self.generatorFilters))(x)
 
         x = PReLU()(x)
@@ -62,8 +62,8 @@ class SRGAN:
 
 
     def train(self, epochs, batchSize):
-        X = np.load('data')
-        Y = np.load('data')
+        X = np.load('data_set/size_32.npy')
+        Y = np.load('data_set/size_64.npy')
 
         X = X.astype(np.float32) / 255
         X = X.reshape([-1, self.imageSize, self.imageSize, self.imageChannels])
@@ -102,10 +102,10 @@ class SRGAN:
             axs[2, i].imshow(datax2[i, :, :, :])
             axs[2, i].axis('off')
 
-        fig.savefig("SRNet_images/gen_%d.png" % epoch)
+        fig.savefig("generat_images/gen_%d.png" % epoch)
         plt.close()
 
 
 if __name__ == '__main__':
-    gan = SRGAN()
-    gan.train(epochs=30, batchSize=64)
+    net = SRResNet()
+    net.train(epochs=30, batchSize=64)
