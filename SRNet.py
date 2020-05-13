@@ -62,8 +62,8 @@ class SRResNet:
 
 
     def train(self, epochs, batchSize):
-        X = np.load('data_set/size_32.npy')
-        Y = np.load('data_set/size_64.npy')
+        X = np.load('data')
+        Y = np.load('data')
 
         X = X.astype(np.float32) / 255
         X = X.reshape([-1, self.imageSize, self.imageSize, self.imageChannels])
@@ -102,7 +102,7 @@ class SRResNet:
             axs[2, i].imshow(datax2[i, :, :, :])
             axs[2, i].axis('off')
 
-        fig.savefig("generat_images/gen_%d.png" % epoch)
+        fig.savefig("images/gen_%d.png" % epoch)
         plt.close()
 
 
