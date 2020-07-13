@@ -1,14 +1,14 @@
 import numpy as np
 import torch
-from torch import nn
+from torch import nn, optim
 from torch.utils.data import TensorDataset, DataLoader
 from torchvision import models
 
 import matplotlib.pyplot as plt
 
 
-EPOCHS = 8
-BATCH_SIZE = 256
+EPOCHS = 32
+BATCH_SIZE = 128
 
 
 class ResidualDenseBlock(nn.Module):
@@ -47,11 +47,11 @@ class Generator(nn.Module):
         self.block2 = ResidualDenseBlock(64)
         self.block3 = ResidualDenseBlock(64)
 
-        self.conv2 = nn.Conv2d(64, 32, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
 
         self.pixelShuffle = nn.Sequential(
             nn.PixelShuffle(2),
-            nn.Conv2d(8, 3, kernel_size=3, padding=1),
+            nn.Conv2d(16, 3, kernel_size=7, padding=3),
             nn.Tanh()
         )
 
@@ -124,74 +124,59 @@ class VGGLoss(nn.Module):
         content_loss = MSELoss(self.contentLayers(fakeFrame), self.contentLayers(frameY))
         return content_loss
 
-def relative(real, fake):
-    Fmean = torch.mean(fake)
-    Rmean = torch.mean(real)
-    real = torch.sigmoid(real - Fmean)
-    fake = torch.sigmoid(fake - Rmean)
-    return real, fake
-
 
 def train(x, y):
     tensor_x, tensor_y = torch.tensor(x, dtype=torch.float), torch.tensor(y, dtype=torch.float)
-    DS = TensorDataset(tensor_x.cuda(), tensor_y.cuda())
+    DS = TensorDataset(tensor_x, tensor_y)
     loader = DataLoader(DS, batch_size=BATCH_SIZE, shuffle=True)
     D.train()
     G.train()
 
-    GeneratorLR = 0.0025
-    DiscriminatorLR = 0.0001
     D_optimizer = torch.optim.Adam(D.parameters(), lr=DiscriminatorLR, betas=(0.9, 0.999))
     G_optimizer = torch.optim.Adam(G.parameters(), lr=GeneratorLR, betas=(0.9, 0.999))
 
-    D_scheduler = optim.lr_scheduler.StepLR(D_optimizer, step_size=1, gamma=0.75)
-    G_scheduler = optim.lr_scheduler.StepLR(G_optimizer, step_size=1, gamma=0.9)
+    realLabel = torch.ones(BATCH_SIZE, 1).cuda()
+    fakeLabel = torch.zeros(BATCH_SIZE, 1).cuda()
+    BCE = torch.nn.BCEWithLogitsLoss()
+    VggLoss = VGGLoss()
 
-    realLabel = torch.ones_like(torch.empty(BATCH_SIZE, 1)).cuda()
-    fakeLabel = torch.zeros_like(torch.empty(BATCH_SIZE, 1)).cuda()
 
-    BCE = torch.nn.BCELoss()
-    v_loss = VGGLoss()
-
-    iterate = int(len(x) / BATCH_SIZE)
+    l = len(x)
+    iterate = int(l / BATCH_SIZE)
     for batch_idx, (X, Y) in enumerate(loader):
         if batch_idx == iterate:
             break
+        X = X.cuda()
+        Y = Y.cuda()
 
         fakeFrame = G(X)
 
-        D_optimizer.zero_grad()
+        D.zero_grad()
         DReal = D(Y)
         DFake = D(fakeFrame)
 
-        DReal, DFake = relative(DReal, DFake)
-        D_loss = (BCE(DReal, realLabel) + BCE(DFake, fakeLabel))
-
+        D_loss = (BCE(DFake, fakeLabel) + BCE(DReal, realLabel)) / 2
         D_loss.backward(retain_graph=True)
         D_optimizer.step()
 
-        G_optimizer.zero_grad()
-        G_label_loss = BCE(DFake, realLabel)
-        G_loss = v_loss(fakeFrame, Y) + 1e-3 * G_label_loss
+        G.zero_grad()
+        G_label_loss= BCE(DFake, realLabel)
+        G_loss = VggLoss(fakeFrame, Y) + 1e-3 * G_label_loss
 
-        print(G_label_loss)
         G_loss.backward()
         G_optimizer.step()
 
         print("G_loss :", G_loss, " D_loss :", D_loss)
 
 
-        D_scheduler.step(batch_idx)
-
-
 def save_imgs(epoch, data, datax2):
     r = 5
 
     G.eval()
-    t_data = (data / 127.5) - 1
+    t_data = (data / 127.5) -1
     genImgs = G(torch.tensor(t_data, dtype=torch.float).cuda())
     genImgs = genImgs.cpu().detach().numpy()
-    genImgs = (genImgs / 2) + 0.5
+    genImgs = genImgs / 2 +0.5
     data = np.transpose(data, (0, 2, 3, 1)) / 255
     genImgs = np.transpose(genImgs, (0, 2, 3, 1))
     datax2 = np.transpose(datax2, (0, 2, 3, 1)) / 255
@@ -205,7 +190,7 @@ def save_imgs(epoch, data, datax2):
         axs[2, i].imshow(datax2[i, :, :, :])
         axs[2, i].axis('off')
 
-    fig.savefig("images/%d.png" % epoch)
+    fig.savefig("images/gen_%d.png" % epoch)
     plt.close()
 
 
@@ -217,11 +202,22 @@ if __name__ == '__main__':
     G = G.cuda()
     D = D.cuda()
 
+    GeneratorLR = 0.00025
+    DiscriminatorLR = 0.00001
+
     X = np.load('data_set')
     Y = np.load('data_set')
+
+    train_x = (X[:-10] / 127.5) - 1
+    train_y = (Y[:-10] / 127.5) - 1
+
+    test_x = X[-5:]
+    test_y = Y[-5:]
+    del X, Y
+
     for epoch in range(EPOCHS):
+        print("epoch : ", epoch)
 
-        train((X / 127.5) - 1, (Y / 127.5) - 1)
-
-        save_imgs(epoch, X[-6:-1], Y[-6:-1])
-
+        train(train_x, train_y)
+        print("eval...")
+        save_imgs(epoch, test_x, test_y)
