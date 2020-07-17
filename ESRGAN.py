@@ -1,57 +1,53 @@
 import numpy as np
 import torch
-from torch import nn
+from torch import nn, optim
 from torch.utils.data import TensorDataset, DataLoader
 from torchvision import models
 
 import matplotlib.pyplot as plt
 
 
-EPOCHS = 8
+EPOCHS = 32
 BATCH_SIZE = 256
 
 
 class ResidualDenseBlock(nn.Module):
-    def __init__(self, deep):
+    def __init__(self, nf=64, gc=32, bias=True):
         super(ResidualDenseBlock, self).__init__()
-        self.conv1 = nn.Conv2d(deep, deep, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv2d(deep, deep, kernel_size=3, padding=1)
-        self.conv3 = nn.Conv2d(deep, deep, kernel_size=3, padding=1)
-        self.conv4 = nn.Conv2d(deep, deep, kernel_size=3, padding=1)
-
-        self.relu1 = nn.PReLU()
-        self.relu2 = nn.PReLU()
-        self.relu3 = nn.PReLU()
-        self.relu4 = nn.PReLU()
-
-        self.convBack = nn.Conv2d(deep, deep, kernel_size=3, padding=1)
+        self.conv1 = nn.Conv2d(nf, gc, 3, padding=1, bias=bias)
+        self.conv2 = nn.Conv2d(nf + gc, gc, 3, padding=1, bias=bias)
+        self.conv3 = nn.Conv2d(nf + 2 * gc, gc, 3, padding=1, bias=bias)
+        self.conv4 = nn.Conv2d(nf + 3 * gc, gc, 3, padding=1, bias=bias)
+        self.conv5 = nn.Conv2d(nf + 4 * gc, nf, 3, padding=1, bias=bias)
+        self.lrelu = nn.LeakyReLU(negative_slope=0.2, inplace=True)
 
     def forward(self, x):
-        c = self.relu1(self.conv1(x))
-        x = x + c
-        c = self.relu2(self.conv2(x))
-        x = x + c
-        c = self.relu3(self.conv3(x))
-        x = x + c
-        c = self.relu4(self.conv4(x))
-        return self.convBack(c)
+        x1 = self.lrelu(self.conv1(x))
+        x2 = self.lrelu(self.conv2(torch.cat((x, x1), dim=1)))
+        x3 = self.lrelu(self.conv3(torch.cat((x, x1, x2), dim=1)))
+        x4 = self.lrelu(self.conv4(torch.cat((x, x1, x2, x3), dim=1)))
+        x5 = self.conv5(torch.cat((x, x1, x2, x3, x4), dim=1))
+        return x5 * 0.2 + x
 
 
 class Generator(nn.Module):
-    def __init__(self):
+    def __init__(self, nf=64):
         super(Generator, self).__init__()
-        self.conv1 = nn.Conv2d(3, 64, kernel_size=9, padding=4)
-        self.relu = nn.PReLU()
+        self.conv1 = nn.Conv2d(3, nf, kernel_size=3, padding=1)
+        self.relu = nn.LeakyReLU(negative_slope=0.2, inplace=True)
 
-        self.block1 = ResidualDenseBlock(64)
-        self.block2 = ResidualDenseBlock(64)
-        self.block3 = ResidualDenseBlock(64)
-
-        self.conv2 = nn.Conv2d(64, 32, kernel_size=3, padding=1)
+        self.blockLayer = nn.Sequential(
+            ResidualDenseBlock(),
+            ResidualDenseBlock(),
+            ResidualDenseBlock(),
+        )
 
         self.pixelShuffle = nn.Sequential(
+            nn.Conv2d(nf, nf * 4, kernel_size=3, padding=1),
+            nn.LeakyReLU(negative_slope=0.2, inplace=True),
             nn.PixelShuffle(2),
-            nn.Conv2d(8, 3, kernel_size=3, padding=1),
+            nn.Conv2d(nf, nf, kernel_size=3, padding=1),
+            nn.Conv2d(nf, 3, kernel_size=3, padding=1),
             nn.Tanh()
         )
 
@@ -59,12 +55,8 @@ class Generator(nn.Module):
         x = self.conv1(x)
         skip = self.relu(x)
 
-        x = self.block1(skip) + x
-        x = self.block2(x) + x
-        x = self.block3(x) + x
-
-        x = self.conv2(x + skip)
-        x = self.pixelShuffle(x)
+        x = self.blockLayer(skip)
+        x = self.pixelShuffle(x + skip)
         return x
 
 
@@ -111,51 +103,53 @@ class Flatten(nn.Module):
         return x.view(x.shape[0], -1)
 
 
-class VGGLoss(nn.Module):
+class VGGPerceptualLoss(torch.nn.Module):
     def __init__(self):
-        super(VGGLoss, self).__init__()
-        vgg = models.vgg16(pretrained=True)
-        self.contentLayers = nn.Sequential(*list(vgg.features)[:31]).cuda().eval()
-        for param in self.contentLayers.parameters():
-            param.requires_grad = False
+        super(VGGPerceptualLoss, self).__init__()
+        blocks = []
+        blocks.append(models.vgg16(pretrained=True).features[:4].eval())
+        blocks.append(models.vgg16(pretrained=True).features[4:9].eval())
+        blocks.append(models.vgg16(pretrained=True).features[9:16].eval())
+        blocks.append(models.vgg16(pretrained=True).features[16:23].eval())
+        blocks.append(models.vgg16(pretrained=True).features[23:30].eval())
+        for bl in blocks:
+            for p in bl:
+                p.requires_grad = False
+        self.blocks = torch.nn.ModuleList(blocks).cuda()
+        self.mean = torch.nn.Parameter(torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1), requires_grad=False).cuda()
+        self.std = torch.nn.Parameter(torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1), requires_grad=False).cuda()
 
     def forward(self, fakeFrame, frameY):
-        MSELoss = nn.MSELoss()
-        content_loss = MSELoss(self.contentLayers(fakeFrame), self.contentLayers(frameY))
-        return content_loss
+        fakeFrame = (fakeFrame - self.mean) / self.std
+        frameY = (frameY - self.mean) / self.std
+        loss = 0.0
+        x = fakeFrame
+        y = frameY
+        for block in self.blocks:
+            x = block(x)
+            y = block(y)
+            loss += torch.nn.functional.mse_loss(x, y)
+        return loss
 
-def relative(real, fake):
-    Fmean = torch.mean(fake)
-    Rmean = torch.mean(real)
-    real = torch.sigmoid(real - Fmean)
-    fake = torch.sigmoid(fake - Rmean)
-    return real, fake
 
-
-def train(x, y):
-    tensor_x, tensor_y = torch.tensor(x, dtype=torch.float), torch.tensor(y, dtype=torch.float)
-    DS = TensorDataset(tensor_x.cuda(), tensor_y.cuda())
-    loader = DataLoader(DS, batch_size=BATCH_SIZE, shuffle=True)
+def train(loader):
     D.train()
     G.train()
 
-    GeneratorLR = 0.0025
-    DiscriminatorLR = 0.0001
     D_optimizer = torch.optim.Adam(D.parameters(), lr=DiscriminatorLR, betas=(0.9, 0.999))
     G_optimizer = torch.optim.Adam(G.parameters(), lr=GeneratorLR, betas=(0.9, 0.999))
 
-    D_scheduler = optim.lr_scheduler.StepLR(D_optimizer, step_size=1, gamma=0.75)
-    G_scheduler = optim.lr_scheduler.StepLR(G_optimizer, step_size=1, gamma=0.9)
+    D_scheduler = optim.lr_scheduler.StepLR(D_optimizer, step_size=1, gamma=0.9)
+    G_scheduler = optim.lr_scheduler.StepLR(G_optimizer, step_size=1, gamma=1)
 
-    realLabel = torch.ones_like(torch.empty(BATCH_SIZE, 1)).cuda()
-    fakeLabel = torch.zeros_like(torch.empty(BATCH_SIZE, 1)).cuda()
+    realLabel = torch.ones(BATCH_SIZE, 1).cuda()
+    fakeLabel = torch.zeros(BATCH_SIZE, 1).cuda()
 
     BCE = torch.nn.BCELoss()
-    v_loss = VGGLoss()
+    v_loss = VGGPerceptualLoss()
 
-    iterate = int(len(x) / BATCH_SIZE)
     for batch_idx, (X, Y) in enumerate(loader):
-        if batch_idx == iterate:
+        if X.shape[0] < BATCH_SIZE:
             break
 
         fakeFrame = G(X)
@@ -165,23 +159,22 @@ def train(x, y):
         DFake = D(fakeFrame)
 
         DReal, DFake = relative(DReal, DFake)
-        D_loss = (BCE(DReal, realLabel) + BCE(DFake, fakeLabel))
+        D_loss = (BCE(DReal, realLabel) + BCE(DFake, fakeLabel)) / 2
 
         D_loss.backward(retain_graph=True)
         D_optimizer.step()
 
         G_optimizer.zero_grad()
-        G_label_loss = BCE(DFake, realLabel)
-        G_loss = v_loss(fakeFrame, Y) + 1e-3 * G_label_loss
+        G_label_loss = (BCE(DReal, fakeLabel) + BCE(DFake, realLabel)) / 2
+        G_loss = v_loss(fakeFrame, Y) + 2e-3 * G_label_loss
 
-        print(G_label_loss)
         G_loss.backward()
         G_optimizer.step()
 
         print("G_loss :", G_loss, " D_loss :", D_loss)
 
-
         D_scheduler.step(batch_idx)
+        G_scheduler.step(batch_idx)
 
 
 def save_imgs(epoch, data, datax2):
@@ -210,18 +203,26 @@ def save_imgs(epoch, data, datax2):
 
 
 if __name__ == '__main__':
-    torch.autograd.set_detect_anomaly(True)
     G = Generator()
     D = Discriminator()
 
     G = G.cuda()
     D = D.cuda()
+    GeneratorLR = 0.0002
+    DiscriminatorLR = 0.00001
 
     X = np.load('data_set')
     Y = np.load('data_set')
+    train_x = (X[:-10] / 127.5) - 1
+    train_y = (Y[:-10] / 127.5) - 1
+
+    test_x = X[-6:-1]
+    test_y = Y[-6:-1]
+    del X, Y
+    tensor_x, tensor_y = torch.tensor(train_x, dtype=torch.float), torch.tensor(train_y, dtype=torch.float)
+    DS = TensorDataset(tensor_x.cuda(), tensor_y.cuda())
+    loader = DataLoader(DS, batch_size=BATCH_SIZE, shuffle=True)
     for epoch in range(EPOCHS):
-
-        train((X / 127.5) - 1, (Y / 127.5) - 1)
-
-        save_imgs(epoch, X[-6:-1], Y[-6:-1])
+        train(loader)
+        save_imgs(epoch, test_x, test_y)
 

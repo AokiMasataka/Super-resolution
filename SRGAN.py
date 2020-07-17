@@ -11,30 +11,20 @@ EPOCHS = 32
 BATCH_SIZE = 128
 
 
-class ResidualDenseBlock(nn.Module):
-    def __init__(self, deep):
-        super(ResidualDenseBlock, self).__init__()
-        self.conv1 = nn.Conv2d(deep, deep, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv2d(deep, deep, kernel_size=3, padding=1)
-        self.conv3 = nn.Conv2d(deep, deep, kernel_size=3, padding=1)
-        self.conv4 = nn.Conv2d(deep, deep, kernel_size=3, padding=1)
-
-        self.relu1 = nn.PReLU()
-        self.relu2 = nn.PReLU()
-        self.relu3 = nn.PReLU()
-        self.relu4 = nn.PReLU()
-
-        self.convBack = nn.Conv2d(deep, deep, kernel_size=3, padding=1)
+class ResidualBlock(nn.Module):
+    def __init__(self, nf=64):
+        super(ResidualBlock, self).__init__()
+        self.Block = nn.Sequential(
+            nn.Conv2d(nf, nf, kernel_size=3, padding=1),
+            nn.BatchNorm2d(nf),
+            nn.PReLU(),
+            nn.Conv2d(nf, nf, kernel_size=3, padding=1),
+            nn.BatchNorm2d(nf),
+        )
 
     def forward(self, x):
-        c = self.relu1(self.conv1(x))
-        x = x + c
-        c = self.relu2(self.conv2(x))
-        x = x + c
-        c = self.relu3(self.conv3(x))
-        x = x + c
-        c = self.relu4(self.conv4(x))
-        return self.convBack(c)
+        out = self.Block(x)
+        return x + out
 
 
 class Generator(nn.Module):
@@ -43,15 +33,19 @@ class Generator(nn.Module):
         self.conv1 = nn.Conv2d(3, 64, kernel_size=9, padding=4)
         self.relu = nn.PReLU()
 
-        self.block1 = ResidualDenseBlock(64)
-        self.block2 = ResidualDenseBlock(64)
-        self.block3 = ResidualDenseBlock(64)
-
-        self.conv2 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
+        self.residualLayer = nn.Sequential(
+            ResidualBlock(),
+            ResidualBlock(),
+            ResidualBlock(),
+            ResidualBlock(),
+            ResidualBlock()
+        )
 
         self.pixelShuffle = nn.Sequential(
+            nn.Conv2d(64, 64*4, kernel_size=3, padding=1),
+            nn.PReLU(),
             nn.PixelShuffle(2),
-            nn.Conv2d(16, 3, kernel_size=7, padding=3),
+            nn.Conv2d(64, 3, kernel_size=9, padding=4),
             nn.Tanh()
         )
 
@@ -59,12 +53,8 @@ class Generator(nn.Module):
         x = self.conv1(x)
         skip = self.relu(x)
 
-        x = self.block1(skip) + x
-        x = self.block2(x) + x
-        x = self.block3(x) + x
-
-        x = self.conv2(x + skip)
-        x = self.pixelShuffle(x)
+        x = self.residualLayer(skip)
+        x = self.pixelShuffle(x + skip)
         return x
 
 
@@ -100,7 +90,8 @@ class Discriminator(nn.Module):
             Flatten(),
             nn.Linear(128 * size, 1024),
             nn.LeakyReLU(0.2),
-            nn.Linear(1024, 1)
+            nn.Linear(1024, 1),
+            nn.Sigmoid()
         )
 
     def forward(self, x):
@@ -125,10 +116,7 @@ class VGGLoss(nn.Module):
         return content_loss
 
 
-def train(x, y):
-    tensor_x, tensor_y = torch.tensor(x, dtype=torch.float), torch.tensor(y, dtype=torch.float)
-    DS = TensorDataset(tensor_x, tensor_y)
-    loader = DataLoader(DS, batch_size=BATCH_SIZE, shuffle=True)
+def train(loader):
     D.train()
     G.train()
 
@@ -137,15 +125,13 @@ def train(x, y):
 
     realLabel = torch.ones(BATCH_SIZE, 1).cuda()
     fakeLabel = torch.zeros(BATCH_SIZE, 1).cuda()
-    BCE = torch.nn.BCEWithLogitsLoss()
+    BCE = torch.nn.BCELoss()
     VggLoss = VGGLoss()
 
-
-    l = len(x)
-    iterate = int(l / BATCH_SIZE)
     for batch_idx, (X, Y) in enumerate(loader):
-        if batch_idx == iterate:
+        if X.shape[0] < BATCH_SIZE:
             break
+
         X = X.cuda()
         Y = Y.cuda()
 
@@ -190,12 +176,11 @@ def save_imgs(epoch, data, datax2):
         axs[2, i].imshow(datax2[i, :, :, :])
         axs[2, i].axis('off')
 
-    fig.savefig("images/gen_%d.png" % epoch)
+    fig.savefig("generat_images/gen_%d.png" % epoch)
     plt.close()
 
 
 if __name__ == '__main__':
-    torch.autograd.set_detect_anomaly(True)
     G = Generator()
     D = Discriminator()
 
@@ -205,19 +190,20 @@ if __name__ == '__main__':
     GeneratorLR = 0.00025
     DiscriminatorLR = 0.00001
 
-    X = np.load('data_set')
-    Y = np.load('data_set')
+    X = np.load('data')
+    Y = np.load('data')
 
     train_x = (X[:-10] / 127.5) - 1
     train_y = (Y[:-10] / 127.5) - 1
 
-    test_x = X[-5:]
-    test_y = Y[-5:]
+    test_x = X[-6:-1]
+    test_y = Y[-6:-1]
     del X, Y
 
-    for epoch in range(EPOCHS):
-        print("epoch : ", epoch)
+    tensor_x, tensor_y = torch.tensor(train_x, dtype=torch.float), torch.tensor(train_y, dtype=torch.float)
+    DS = TensorDataset(tensor_x.cuda(), tensor_y.cuda())
+    loader = DataLoader(DS, batch_size=BATCH_SIZE, shuffle=True)
 
-        train(train_x, train_y)
-        print("eval...")
+    for epoch in range(EPOCHS):
+        train(loader)
         save_imgs(epoch, test_x, test_y)
