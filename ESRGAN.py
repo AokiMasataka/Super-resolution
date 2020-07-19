@@ -112,9 +112,9 @@ class VGGPerceptualLoss(torch.nn.Module):
         blocks.append(models.vgg16(pretrained=True).features[9:16].eval())
         blocks.append(models.vgg16(pretrained=True).features[16:23].eval())
         blocks.append(models.vgg16(pretrained=True).features[23:30].eval())
-        for bl in blocks:
-            for p in bl:
-                p.requires_grad = False
+        for block in blocks:
+            for param in block:
+                param.requires_grad = False
         self.blocks = torch.nn.ModuleList(blocks).cuda()
         self.mean = torch.nn.Parameter(torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1), requires_grad=False).cuda()
         self.std = torch.nn.Parameter(torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1), requires_grad=False).cuda()
@@ -128,9 +128,16 @@ class VGGPerceptualLoss(torch.nn.Module):
         for block in self.blocks:
             x = block(x)
             y = block(y)
-            loss += torch.nn.functional.mse_loss(x, y)
+            loss += torch.nn.functional.l1_loss(x, y)
         return loss
 
+
+def relative(real, fake):
+    Fmean = torch.mean(fake)
+    Rmean = torch.mean(real)
+    real = torch.sigmoid(real - Fmean)
+    fake = torch.sigmoid(fake - Rmean)
+    return real, fake
 
 def train(loader):
     D.train()
@@ -165,8 +172,8 @@ def train(loader):
         D_optimizer.step()
 
         G_optimizer.zero_grad()
-        G_label_loss = (BCE(DReal, fakeLabel) + BCE(DFake, realLabel)) / 2
-        G_loss = v_loss(fakeFrame, Y) + 2e-3 * G_label_loss
+        G_label_loss = BCE(DFake, realLabel)
+        G_loss = v_loss(fakeFrame, Y) + G_label_loss * 0.005
 
         G_loss.backward()
         G_optimizer.step()
