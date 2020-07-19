@@ -111,8 +111,7 @@ class VGGLoss(nn.Module):
             param.requires_grad = False
 
     def forward(self, fakeFrame, frameY):
-        MSELoss = nn.MSELoss()
-        content_loss = MSELoss(self.contentLayers(fakeFrame), self.contentLayers(frameY))
+        content_loss = torch.nn.functional.mse_loss(self.contentLayers(fakeFrame), self.contentLayers(frameY))
         return content_loss
 
 
@@ -162,7 +161,7 @@ def save_imgs(epoch, data, datax2):
     t_data = (data / 127.5) -1
     genImgs = G(torch.tensor(t_data, dtype=torch.float).cuda())
     genImgs = genImgs.cpu().detach().numpy()
-    genImgs = genImgs / 2 +0.5
+    genImgs = genImgs / 2 + 0.5
     data = np.transpose(data, (0, 2, 3, 1)) / 255
     genImgs = np.transpose(genImgs, (0, 2, 3, 1))
     datax2 = np.transpose(datax2, (0, 2, 3, 1)) / 255
